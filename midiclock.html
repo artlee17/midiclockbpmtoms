@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MIDI Clock Display</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom spinner for loading state */
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top: 4px solid #fff;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-black text-white min-h-screen flex items-center justify-center p-4">
+
+    <div class="bg-gray-900 rounded-2xl shadow-xl p-8 max-w-md w-full text-center">
+        <h1 class="text-3xl font-bold mb-6 text-indigo-400">MIDI Clock Display</h1>
+        
+        <div id="status-message" class="text-gray-400 mb-6 flex items-center justify-center space-x-2">
+            <div class="spinner"></div>
+            <span>Waiting for MIDI access...</span>
+        </div>
+
+        <div id="content" class="hidden">
+            <!-- MIDI Input Selection -->
+            <div class="mb-4">
+                <label for="midi-input-select" class="block text-sm font-medium text-gray-400 mb-1">
+                    Select MIDI Input
+                </label>
+                <select id="midi-input-select" class="w-full bg-gray-800 text-white border border-gray-700 rounded-md py-2 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                    <!-- Options will be populated by JavaScript -->
+                </select>
+            </div>
+            
+            <!-- Note Value Selection -->
+            <div class="mb-6">
+                <label for="note-value-select" class="block text-sm font-medium text-gray-400 mb-1">
+                    Select Note Value
+                </label>
+                <select id="note-value-select" class="w-full bg-gray-800 text-white border border-gray-700 rounded-md py-2 px-3 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                    <option value="48">Half Note</option>
+                    <option value="24" selected>Quarter Note</option>
+                    <option value="12">Eighth Note</option>
+                    <option value="6">Sixteenth Note</option>
+                </select>
+            </div>
+
+            <div class="bg-gray-800 rounded-xl p-6 mb-4 cursor-pointer" id="bpm-area">
+                <p class="text-gray-400 text-sm mb-1">Beats Per Minute (BPM)</p>
+                <div class="text-5xl font-extrabold text-white" id="bpm-display">--</div>
+            </div>
+
+            <div class="bg-gray-800 rounded-xl p-6">
+                <p class="text-gray-400 text-sm mb-1" id="ms-label">Milliseconds per Quarter Note</p>
+                <div class="text-6xl font-extrabold text-white" id="ms-per-beat-display">--</div>
+            </div>
+            
+            <p class="mt-6 text-gray-500 text-sm">
+                Tap the BPM area to set the tempo manually if no MIDI clock is received.
+            </p>
+        </div>
+    </div>
+
+    <script>
+        // Use a descriptive variable for the app ID, falling back to a default if not provided
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        // Get HTML elements
+        const statusMessage = document.getElementById('status-message');
+        const content = document.getElementById('content');
+        const midiInputSelect = document.getElementById('midi-input-select');
+        const noteValueSelect = document.getElementById('note-value-select');
+        const bpmDisplay = document.getElementById('bpm-display');
+        const msPerBeatDisplay = document.getElementById('ms-per-beat-display');
+        const msLabel = document.getElementById('ms-label');
+        const bpmArea = document.getElementById('bpm-area');
+
+        let lastClockTime = 0;
+        const clockTimes = [];
+        const tapTimes = [];
+        const MAX_CLOCKS = 10; // Keep track of the last 10 clock intervals for smoothing
+        const MAX_TAPS = 4; // Use the last 4 taps for smoothing
+        let midiAccess = null;
+        let activeInput = null;
+        let isMidiReceiving = false;
+        let updateIntervalId = null;
+
+        // Asynchronous function to initialize Web MIDI API
+        async function initMidi() {
+            try {
+                // Request access to MIDI devices
+                midiAccess = await navigator.requestMIDIAccess();
+
+                // Get the inputs from the MIDI access object
+                const inputs = midiAccess.inputs;
+
+                if (inputs.size === 0) {
+                    statusMessage.innerHTML = 'No MIDI input devices found.';
+                    content.classList.add('hidden');
+                    return;
+                }
+
+                // Populate the MIDI input dropdown
+                let firstInputId = null;
+                midiInputSelect.innerHTML = ''; // Clear previous options
+                for (let input of inputs.values()) {
+                    if (!firstInputId) firstInputId = input.id;
+                    const option = document.createElement('option');
+                    option.value = input.id;
+                    option.textContent = input.name || `Unnamed Device ${input.id}`;
+                    midiInputSelect.appendChild(option);
+                }
+
+                // Attach event listener to the first available input by default
+                if (firstInputId) {
+                    attachInputListener(firstInputId);
+                }
+                
+                // Set up event listeners for dropdowns and buttons
+                midiInputSelect.addEventListener('change', (e) => {
+                    attachInputListener(e.target.value);
+                });
+                noteValueSelect.addEventListener('change', updateMsLabel);
+                bpmArea.addEventListener('click', handleTapTempo);
+
+                // Start the display update loop to run every 2 seconds
+                updateIntervalId = setInterval(updateDisplay, 2000); 
+
+                // Update the status message and show the content
+                statusMessage.innerHTML = '<span class="text-green-400">Receiving MIDI clock...</span>';
+                content.classList.remove('hidden');
+
+            } catch (error) {
+                // Handle errors if MIDI access is denied or not supported
+                console.error("Could not access your MIDI devices.", error);
+                statusMessage.textContent = 'Web MIDI API is not supported in this browser.';
+                content.classList.add('hidden');
+            }
+        }
+
+        function attachInputListener(inputId) {
+            // Remove listener from the previously active input
+            if (activeInput) {
+                activeInput.onmidimessage = null;
+            }
+
+            // Get the new input and attach the listener
+            activeInput = midiAccess.inputs.get(inputId);
+            if (activeInput) {
+                activeInput.onmidimessage = onMidiMessage;
+                console.log(`Listening for MIDI messages on: ${activeInput.name}`);
+            }
+        }
+
+        // Function to handle tap tempo clicks
+        function handleTapTempo() {
+            const currentTime = performance.now();
+            if (tapTimes.length > 0) {
+                const deltaTime = currentTime - tapTimes[tapTimes.length - 1];
+                if (deltaTime < 2500) { // If tap is within 2.5 seconds, use it
+                    tapTimes.push(currentTime);
+                    if (tapTimes.length > MAX_TAPS) {
+                        tapTimes.shift(); // Remove the oldest tap
+                    }
+                } else {
+                    // Reset if the user waited too long
+                    tapTimes.length = 0;
+                    tapTimes.push(currentTime);
+                }
+            } else {
+                tapTimes.push(currentTime);
+            }
+
+            if (tapTimes.length > 1) {
+                // Calculate average interval between taps
+                let totalInterval = 0;
+                for (let i = 1; i < tapTimes.length; i++) {
+                    totalInterval += tapTimes[i] - tapTimes[i-1];
+                }
+                const averageInterval = totalInterval / (tapTimes.length - 1);
+                
+                const bpm = 60000 / averageInterval;
+                
+                // Get the selected note value from the dropdown
+                const pulsesPerNote = parseInt(noteValueSelect.value, 10);
+                const msPerBeat = averageInterval;
+
+                // Update the display with calculated values
+                bpmDisplay.textContent = bpm.toFixed(2);
+                msPerBeatDisplay.textContent = msPerBeat.toFixed(2);
+                msLabel.textContent = `Milliseconds per Quarter Note (Tapped)`;
+            }
+        }
+        
+        function updateMsLabel() {
+            const selectedNote = noteValueSelect.options[noteValueSelect.selectedIndex].text;
+            msLabel.textContent = `Milliseconds per ${selectedNote}`;
+        }
+
+        // Function to handle incoming MIDI messages (only collects data, no UI updates)
+        function onMidiMessage(event) {
+            // MIDI Clock message is 0xF8
+            const command = event.data[0];
+            if (command === 0xF8) {
+                const currentTime = performance.now();
+                if (lastClockTime !== 0) {
+                    const deltaTime = currentTime - lastClockTime;
+                    clockTimes.push(deltaTime);
+                    if (clockTimes.length > MAX_CLOCKS) {
+                        clockTimes.shift(); // Remove the oldest interval
+                    }
+                }
+                lastClockTime = currentTime;
+                isMidiReceiving = true;
+            }
+        }
+
+        // New function to update the display at a controlled interval
+        function updateDisplay() {
+            if (isMidiReceiving && clockTimes.length > 0) {
+                // Calculate the average interval from the collected data
+                const averageDeltaTime = clockTimes.reduce((a, b) => a + b, 0) / clockTimes.length;
+                
+                // MIDI clock sends 24 pulses per quarter note (PPQN)
+                const msPerPulse = averageDeltaTime;
+                const pulsesPerSecond = 1000 / msPerPulse;
+                const pulsesPerMinute = pulsesPerSecond * 60;
+                const bpm = pulsesPerMinute / 24;
+                
+                // Get the selected note value from the dropdown
+                const pulsesPerNote = parseInt(noteValueSelect.value, 10);
+                const msPerBeat = msPerPulse * pulsesPerNote;
+
+                // Update the display with calculated values
+                bpmDisplay.textContent = bpm.toFixed(2);
+                msPerBeatDisplay.textContent = msPerBeat.toFixed(2);
+                msLabel.textContent = `Milliseconds per ${noteValueSelect.options[noteValueSelect.selectedIndex].text}`;
+            } else if (!isMidiReceiving) {
+                // Reset displays if clock messages stop coming in
+                bpmDisplay.textContent = '--';
+                msPerBeatDisplay.textContent = '--';
+                // Also reset the clockTimes array to prevent old data from being displayed
+                clockTimes.length = 0;
+            }
+            // Reset the flag to check for new messages in the next interval
+            isMidiReceiving = false;
+        }
+
+        // Check for Web MIDI API support and initialize
+        if (navigator.requestMIDIAccess) {
+            window.onload = initMidi;
+        } else {
+            statusMessage.textContent = 'Web MIDI API is not supported in this browser.';
+            content.classList.add('hidden');
+        }
+
+    </script>
+</body>
+</html>
